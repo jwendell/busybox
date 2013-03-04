@@ -758,6 +758,24 @@ static void timestamp_and_log_internal(const char *msg)
 	timestamp_and_log(LOG_SYSLOG | LOG_INFO, (char*)msg, 0);
 }
 
+static int extract_prio (char **buf)
+{
+	char *p = *buf;
+	int pri = (LOG_USER | LOG_NOTICE);
+
+	if (*p == '<') {
+		/* Parse the magic priority number */
+		pri = bb_strtou(p + 1, &p, 10);
+		if (*p == '>')
+			p++;
+		if (pri & ~(LOG_FACMASK | LOG_PRIMASK))
+			pri = (LOG_USER | LOG_NOTICE);
+	}
+
+	*buf = p;
+	return pri;
+}
+
 /* tmpbuf[len] is a NUL byte (set by caller), but there can be other,
  * embedded NULs. Split messages on each of these NULs, parse prio,
  * escape control chars and log each locally. */
@@ -769,16 +787,7 @@ static void split_escape_and_log(char *tmpbuf, int len)
 	while (p < tmpbuf) {
 		char c;
 		char *q = G.parsebuf;
-		int pri = (LOG_USER | LOG_NOTICE);
-
-		if (*p == '<') {
-			/* Parse the magic priority number */
-			pri = bb_strtou(p + 1, &p, 10);
-			if (*p == '>')
-				p++;
-			if (pri & ~(LOG_FACMASK | LOG_PRIMASK))
-				pri = (LOG_USER | LOG_NOTICE);
-		}
+		int pri = extract_prio (&p);
 
 		while ((c = *p++)) {
 			if (c == '\n')
@@ -863,6 +872,8 @@ static void do_syslogd(void)
 	int sock_fd;
 #if ENABLE_FEATURE_REMOTE_LOG
 	llist_t *item;
+	char *p;
+	int pri;
 #endif
 #if ENABLE_FEATURE_SYSLOGD_DUP
 	int last_sz = -1;
@@ -935,33 +946,37 @@ static void do_syslogd(void)
 		 * over network, mimic that */
 		recvbuf[sz] = '\n';
 
-		/* We are not modifying log messages in any way before send */
-		/* Remote site cannot trust _us_ anyway and need to do validation again */
-		for (item = G.remoteHosts; item != NULL; item = item->link) {
-			remoteHost_t *rh = (remoteHost_t *)item->data;
+		p = recvbuf;
+		pri = extract_prio (&p);
+		if (LOG_PRI(pri) < G.logLevel) {
+			/* We are not modifying log messages in any way before send */
+			/* Remote site cannot trust _us_ anyway and need to do validation again */
+			for (item = G.remoteHosts; item != NULL; item = item->link) {
+				remoteHost_t *rh = (remoteHost_t *)item->data;
 
-			if (rh->remoteFD == -1) {
-				rh->remoteFD = try_to_resolve_remote(rh);
-				if (rh->remoteFD == -1)
-					continue;
-			}
+				if (rh->remoteFD == -1) {
+					rh->remoteFD = try_to_resolve_remote(rh);
+					if (rh->remoteFD == -1)
+						continue;
+				}
 
-			/* Send message to remote logger.
-			 * On some errors, close and set remoteFD to -1
-			 * so that DNS resolution is retried.
-			 */
-			if (sendto(rh->remoteFD, recvbuf, sz+1,
-					MSG_DONTWAIT | MSG_NOSIGNAL,
-					&(rh->remoteAddr->u.sa), rh->remoteAddr->len) == -1
-			) {
-				switch (errno) {
-				case ECONNRESET:
-				case ENOTCONN: /* paranoia */
-				case EPIPE:
-					close(rh->remoteFD);
-					rh->remoteFD = -1;
-					free(rh->remoteAddr);
-					rh->remoteAddr = NULL;
+				/* Send message to remote logger.
+				 * On some errors, close and set remoteFD to -1
+				 * so that DNS resolution is retried.
+				 */
+				if (sendto(rh->remoteFD, recvbuf, sz+1,
+						MSG_DONTWAIT | MSG_NOSIGNAL,
+						&(rh->remoteAddr->u.sa), rh->remoteAddr->len) == -1
+				) {
+					switch (errno) {
+					case ECONNRESET:
+					case ENOTCONN: /* paranoia */
+					case EPIPE:
+						close(rh->remoteFD);
+						rh->remoteFD = -1;
+						free(rh->remoteAddr);
+						rh->remoteAddr = NULL;
+					}
 				}
 			}
 		}
